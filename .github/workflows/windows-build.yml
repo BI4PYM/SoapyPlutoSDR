@@ -1,0 +1,85 @@
+name: Windows Build
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - { msvc_toolset: 142, generator: "Visual Studio 16 2019", arch: x64 }
+          - { msvc_toolset: 143, generator: "Visual Studio 17 2022", arch: x64 }
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Install dependencies with vcpkg
+      shell: pwsh
+      run: |
+        # Clone vcpkg
+        git clone https://github.com/Microsoft/vcpkg.git
+        cd vcpkg
+        .\bootstrap-vcpkg.bat
+        
+        # Install required packages for x64
+        .\vcpkg install libiio:x64-windows libusb:x64-windows soapysdr:x64-windows
+        
+        # Set VCPKG_ROOT for later steps
+        echo "VCPKG_ROOT=${{ github.workspace }}\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+    - name: Create build directory
+      run: |
+        mkdir build
+        cd build
+
+    - name: Configure with CMake
+      shell: pwsh
+      run: |
+        cd build
+        cmake .. -G "${{ matrix.generator }}" -A ${{ matrix.arch }} `
+          -DCMAKE_TOOLCHAIN_FILE="${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake" `
+          -DVCPKG_TARGET_TRIPLET="${{ matrix.arch }}-windows" `
+          -DCMAKE_BUILD_TYPE=Release
+
+    - name: Build
+      shell: pwsh
+      run: |
+        cd build
+        cmake --build . --config Release --verbose
+
+    - name: Find DLL files
+      shell: pwsh
+      run: |
+        $dlls = Get-ChildItem -Path build -Filter "*.dll" -Recurse
+        if ($dlls.Count -eq 0) {
+          Write-Host "No DLL files found in build directory"
+          Get-ChildItem -Path build -Recurse | Where-Object {$_.Extension -in @('.dll', '.so', '.lib')}
+        } else {
+          Write-Host "Found DLL files:"
+          $dlls | ForEach-Object { Write-Host $_.FullName }
+        }
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: windows-dll-${{ matrix.arch }}-${{ matrix.msvc_toolset }}
+        path: |
+          build/**/*.dll
+          build/**/*.lib
+        if-no-files-found: warn
+
+    - name: Create Release (on tag)
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          build/**/*.dll
+          build/**/*.lib
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
